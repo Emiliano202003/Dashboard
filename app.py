@@ -1,4 +1,4 @@
-# app.py
+# app_nueva.py
 # -*- coding: utf-8 -*-
 
 import os
@@ -10,86 +10,89 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-# ------------------------------------------------------------------
-# CONFIGURACIÓN GENERAL
-# ------------------------------------------------------------------
-
+# ------------------------------------------------------
+# CONFIG GENERAL
+# ------------------------------------------------------
 st.set_page_config(
-    page_title="Danu Churn Dashboard",
+    page_title="DanuCard – Churn & Risk Dashboard",
     layout="wide"
 )
 
 st.title("DanuCard – Churn & Risk Dashboard")
 
-# ------------------------------------------------------------------
-# CARGA DE DATOS
-# ------------------------------------------------------------------
+# ------------------------------------------------------
+# RUTAS / IDS IMPORTANTES (CÁMBIALO SI HACE FALTA)
+# ------------------------------------------------------
+# ID de Google Drive de tu base_integrada_small
+DRIVE_BASE_ID = "1YsiyVjCNO-9ZJx6uAI3AiO3wHE3hBE63"
 
+# Nombre local de los archivos en el repo
+AGG_FILE = "transactions_by_state_month.csv"
+POWER_PKL = "power_transformer.pkl"
+MODEL_PKL = "xgboost_model.pkl"
+
+# ------------------------------------------------------
+# CARGA DE DATOS
+# ------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def load_agg_transactions():
     """
-    Carga el archivo ya agregado por mes y estado:
-    columns esperadas: month, state, total_trx, total_amount, n_users
+    Carga el archivo agregado por mes y estado:
+    columnas esperadas: month, state, total_trx, total_amount, n_users
     """
-    df = pd.read_csv("transactions_by_state_month.csv")
+    df = pd.read_csv(AGG_FILE)
     df["month"] = df["month"].astype(str)
     return df
 
 
 @st.cache_data(show_spinner=False)
-def load_users_base():
+def load_users_base_from_drive(file_id: str):
     """
-    Carga la base de usuarios desde Google Drive.
-    Usa la base integrada 'small' que subiste a Drive.
+    Descarga la base de usuarios desde Google Drive usando el ID.
     """
-    # Este es SOLO el ID del archivo (sale de la URL de compartir)
-    file_id = "1YsiyVjCNO-9ZJx6uAI3AiO3wHE3hBE63"
-
-    base_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-
+    url = f"https://drive.google.com/uc?export=download&id={file_id}"
     try:
-        base = pd.read_csv(base_url)
+        base = pd.read_csv(url)
         return base
     except Exception as e:
         st.error(f"No se pudo cargar la base de usuarios desde Drive: {e}")
         return None
 
 
-
-
 @st.cache_resource(show_spinner=False)
 def load_model_and_transformer():
+    """
+    Carga el PowerTransformer y el modelo XGBoost desde archivos locales.
+    Si alguno falla, regresa None.
+    """
     power_tf = None
     model = None
-    try:
-        with open("power_transformer.pkl", "rb") as f:
-            power_tf = pickle.load(f)
-    except Exception as e:
-        st.warning(f"No se pudo cargar power_transformer.pkl: {e}")
 
     try:
-        with open("xgboost_model.pkl", "rb") as f:
+        with open(POWER_PKL, "rb") as f:
+            power_tf = pickle.load(f)
+    except Exception as e:
+        st.warning(f"No se pudo cargar {POWER_PKL}: {e}")
+
+    try:
+        with open(MODEL_PKL, "rb") as f:
             model = pickle.load(f)
     except Exception as e:
-        st.warning(f"No se pudo cargar xgboost_model.pkl: {e}")
+        st.warning(f"No se pudo cargar {MODEL_PKL}: {e}")
 
     return power_tf, model
 
 
+# Cargamos datos globales
 agg_tx = load_agg_transactions()
-base_integrada = load_users_base()
+base_integrada = load_users_base_from_drive(DRIVE_BASE_ID)
 power_transformer, xgb_model = load_model_and_transformer()
 
-# ------------------------------------------------------------------
-# MÉTRICAS A PARTIR DEL ARCHIVO AGREGADO
-# ------------------------------------------------------------------
-
+# ------------------------------------------------------
+# MÉTRICAS A PARTIR DEL ARCHIVO AGREGADO (PAGE 1)
+# ------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def compute_monthly_metrics(agg_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    A partir de transactions_by_state_month.csv,
-    calcula métricas por mes (sumando todos los estados).
-    """
     metrics = (
         agg_df
         .groupby("month", as_index=False)
@@ -101,7 +104,6 @@ def compute_monthly_metrics(agg_df: pd.DataFrame) -> pd.DataFrame:
         .sort_values("month")
     )
 
-    # Crecimientos porcentuales
     metrics["users_growth_pct"] = metrics["n_users"].pct_change() * 100
     metrics["trx_growth_pct"] = metrics["total_trx"].pct_change() * 100
 
@@ -113,7 +115,7 @@ def compute_monthly_metrics(agg_df: pd.DataFrame) -> pd.DataFrame:
         metrics["amount_per_user"].pct_change() * 100
     )
 
-    # Proxy sencillo de churn: caída de usuarios = churn
+    # Proxy de churn: caída de usuarios = churn
     metrics["churn_proxy"] = -metrics["users_growth_pct"]
 
     return metrics
@@ -121,9 +123,6 @@ def compute_monthly_metrics(agg_df: pd.DataFrame) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def compute_state_metrics(agg_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Métricas agregadas por estado a partir del archivo de meses/estados.
-    """
     df = (
         agg_df
         .groupby("state", as_index=False)
@@ -141,8 +140,7 @@ def compute_state_metrics(agg_df: pd.DataFrame) -> pd.DataFrame:
         df["total_amount"] / df["n_users"].replace(0, np.nan)
     )
 
-    # Proxy de churn por estado (opcional)
-    # mientras más pocos usuarios => "más churn"
+    # Proxy de churn por estado (menos usuarios => más churn)
     df["churn_proxy"] = -df["n_users"]
     return df
 
@@ -150,10 +148,9 @@ def compute_state_metrics(agg_df: pd.DataFrame) -> pd.DataFrame:
 monthly_metrics = compute_monthly_metrics(agg_tx)
 state_metrics = compute_state_metrics(agg_tx)
 
-# ------------------------------------------------------------------
-# MODELO DE CHURN SOBRE BASE DE USUARIOS
-# ------------------------------------------------------------------
-
+# ------------------------------------------------------
+# MODELO DE CHURN SOBRE BASE DE USUARIOS (PAGE 2 / 3)
+# ------------------------------------------------------
 FEATURES_CAT = [
     "share_tier", "antiguedad_categoria", "usertype", "gender",
     "occupation", "creationflow"
@@ -165,23 +162,24 @@ FEATURES_NUM = [
 ]
 
 
-def score_users_with_model(base, power_tf, model):
-    # Si no hay base, regresamos DF vacío
-    if base is None:
+def score_users_with_model(base: pd.DataFrame,
+                           power_tf,
+                           model) -> pd.DataFrame:
+    """
+    Calcula churn_proba para cada usuario si el modelo y las columnas existen.
+    Si algo falla, añade churn_proba = NaN y regresa la base tal cual.
+    """
+    if base is None or base.empty:
         return pd.DataFrame()
 
     df = base.copy()
 
-    # Revisamos columnas requeridas
     missing = [c for c in (FEATURES_CAT + FEATURES_NUM) if c not in df.columns]
-
-    # Si faltan columnas o no hay modelo, simplemente no calculamos nada
+    if missing:
+        st.warning(f"En la base de usuarios faltan columnas para el modelo: {missing}")
     if missing or model is None:
-        # No mostramos mensajes, solo devolvemos la base con churn_proba en NaN
         df["churn_proba"] = np.nan
         return df
-
-    # --- A partir de aquí es igual que antes ---
 
     df_model = df.dropna(subset=FEATURES_CAT + FEATURES_NUM).copy()
 
@@ -191,23 +189,21 @@ def score_users_with_model(base, power_tf, model):
         try:
             X_num = power_tf.transform(X_num)
         except Exception:
-            # si falla el transformer, seguimos con los datos crudos
+            # Si falla, usamos valores sin transformar
             pass
 
     # Categóricas
     X_cat = pd.get_dummies(df_model[FEATURES_CAT].astype(str), drop_first=False)
     X = np.concatenate([X_num, X_cat.values], axis=1)
 
-    # Predicción
     try:
         proba = model.predict_proba(X)[:, 1]
         df_model["churn_proba"] = proba
-    except Exception:
-        # Si el modelo truena, mejor no romper nada
+    except Exception as e:
+        st.warning(f"El modelo no aceptó el formato de entrada: {e}")
         df["churn_proba"] = np.nan
         return df
 
-    # Unimos de regreso
     df = df.merge(df_model[["id_user", "churn_proba"]], on="id_user", how="left")
     return df
 
@@ -227,12 +223,11 @@ else:
     if "risk_level" not in base_scored.columns:
         base_scored["risk_level"] = np.nan
 
-# ------------------------------------------------------------------
-# ASIGNACIÓN DE MOTIVO DE CHURN
-# ------------------------------------------------------------------
-
+# ------------------------------------------------------
+# ASIGNACIÓN DE MOTIVO DE CHURN (REGLAS SIMPLES)
+# ------------------------------------------------------
 @st.cache_data(show_spinner=False)
-def compute_churn_reasons(df):
+def compute_churn_reasons(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
 
@@ -244,7 +239,6 @@ def compute_churn_reasons(df):
     else:
         subset = data
 
-    # Percentiles
     q_ll = subset["llamadas_cc"].quantile(0.75)
     q_amt = subset["total_amount"].quantile(0.25)
     q_trx = subset["total_trx"].quantile(0.25)
@@ -265,16 +259,14 @@ def compute_churn_reasons(df):
 
 base_with_reasons = compute_churn_reasons(base_scored)
 
-# ------------------------------------------------------------------
-# PÁGINA 1 – STATISTICS ON SERVICE / APP USAGE
-# ------------------------------------------------------------------
-
+# ------------------------------------------------------
+# PÁGINA 1 – SERVICE / APP USAGE (AGREGADO)
+# ------------------------------------------------------
 def page_1():
     st.subheader("1. Statistics on Service / App Usage")
 
     df = agg_tx.copy()
 
-    # Filtros
     col_f1, col_f2 = st.columns(2)
 
     with col_f1:
@@ -304,7 +296,6 @@ def page_1():
 
     metrics_f = compute_monthly_metrics(df_f)
 
-    # KPIs
     churn_increase = metrics_f["churn_proxy"].dropna().mean()
     trx_increase = metrics_f["trx_growth_pct"].dropna().mean()
     amount_increase = metrics_f["amount_per_user_growth_pct"].dropna().mean()
@@ -361,7 +352,7 @@ def page_1():
             else:
                 st.info(
                     "Aquí podrías mostrar el pie de riesgo histórico una vez que "
-                    "la base de usuarios cargue correctamente."
+                    "la base de usuarios y el modelo carguen correctamente."
                 )
 
     else:
@@ -415,10 +406,9 @@ def page_1():
             st.plotly_chart(fig_bar, use_container_width=True)
 
 
-# ------------------------------------------------------------------
-# PÁGINA 2 – USER TENDENCY & USER AT RISK ANALYSIS
-# ------------------------------------------------------------------
-
+# ------------------------------------------------------
+# PÁGINA 2 – USER TENDENCY & USERS AT RISK
+# ------------------------------------------------------
 def page_2():
     st.subheader("2. User Tendency & User at Risk Analysis")
 
@@ -426,7 +416,7 @@ def page_2():
         st.info("No se pudo cargar la base de usuarios para el modelo.")
         return
 
-    # Para la gráfica de tendencia usamos la métrica mensual (proxy de churn)
+    # Tendencia usando proxy de churn mensual
     tendency = monthly_metrics[["month", "churn_proxy"]].copy()
     tendency.rename(columns={"churn_proxy": "avg_churn_risk"}, inplace=True)
 
@@ -448,7 +438,7 @@ def page_2():
 
     with col_cards:
         total_users = len(base_scored)
-        if base_scored["churn_proba"].notna().any():
+        if "churn_proba" in base_scored.columns and base_scored["churn_proba"].notna().any():
             prob = base_scored["churn_proba"]
         elif "churn" in base_scored.columns:
             prob = base_scored["churn"]
@@ -473,7 +463,7 @@ def page_2():
     col_left, col_mid, col_right = st.columns([1, 1, 2])
 
     with col_left:
-        st.markdown("**Client value**")
+        st.markdown("**Client value (share_tier)**")
         if "share_tier" in base_scored.columns:
             tiers = sorted(base_scored["share_tier"].dropna().unique())
             for t in tiers:
@@ -516,10 +506,9 @@ def page_2():
             st.plotly_chart(fig_bar, use_container_width=True)
 
 
-# ------------------------------------------------------------------
+# ------------------------------------------------------
 # PÁGINA 3 – STRATEGY FOR CHURN RISK BY TIER
-# ------------------------------------------------------------------
-
+# ------------------------------------------------------
 def page_3():
     st.subheader("3. Strategy for Churn Risk by Tier")
 
@@ -543,7 +532,7 @@ def page_3():
         for motive in motives[:2]:
             with st.expander(f"Strategy for {motive.title()} – click to view"):
                 st.write(
-                    f"Texto futuro a insertar para **Tier {selected_tier}** "
+                    f"Aquí iría la estrategia específica para **Tier {selected_tier}** "
                     f"y motivo **{motive}**."
                 )
 
@@ -551,19 +540,18 @@ def page_3():
         for motive in motives[2:]:
             with st.expander(f"Strategy for {motive.title()} – click to view"):
                 st.write(
-                    f"Texto futuro a insertar para **Tier {selected_tier}** "
+                    f"Aquí iría la estrategia específica para **Tier {selected_tier}** "
                     f"y motivo **{motive}**."
                 )
 
     st.markdown("#### All together")
     with st.expander("All motives and all tiers"):
         st.write(
-            "Texto futuro a insertar con las 12 soluciones "
-            "(4 motivos × 3 tiers)."
+            "Sección para resumir las 12 soluciones (4 motivos × 3 tiers)."
         )
 
     st.markdown("---")
-    st.markdown("### Churn tendency and impact of strategies")
+    st.markdown("### Churn tendency and impact of strategies (simulación)")
 
     hist = monthly_metrics.sort_values("month").copy()
     if hist.empty:
@@ -608,10 +596,9 @@ def page_3():
     st.plotly_chart(fig_scen, use_container_width=True)
 
 
-# ------------------------------------------------------------------
+# ------------------------------------------------------
 # NAVEGACIÓN
-# ------------------------------------------------------------------
-
+# ------------------------------------------------------
 page = st.sidebar.radio(
     "Selecciona la página",
     options=[
@@ -627,9 +614,3 @@ elif page.startswith("2"):
     page_2()
 else:
     page_3()
-
-
-
-
-
-
