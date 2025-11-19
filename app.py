@@ -26,24 +26,16 @@ st.title("DanuCard – Churn & Risk Dashboard")
 # ------------------------------------------------------------------
 
 @st.cache_data(show_spinner=False)
-@st.cache_data(show_spinner=False)
 def load_data():
-    # 👇 tus links de Google Drive
-    base_url = "https://drive.google.com/uc?export=download&id=14a3S4LtFiG7j6pw1QtFWGxg1hx4bQvnz"
-    trans_url = "https://drive.google.com/uc?export=download&id=11S9-SZCMF30LGyMWz4nexjIW8Ltdi1oo"
+    # base_integrada (3).csv
+    base_url = "https://drive.google.com/uc?export=download&id=11S9-SZCMF30LGyMWz4nexjIW8Ltdi1oo"
+    # combined_transactions (1).csv
+    trans_url = "https://drive.google.com/uc?export=download&id=14a3S4LtFiG7j6pw1QtFWGxg1hx4bQvnz"
 
     base = pd.read_csv(base_url)
-    trans = pd.read_csv(trans_url)  # 👈 ya no usamos parse_dates aquí
 
-    # Si existe la columna 'fechaf', la convertimos a datetime
-    if "fechaf" in trans.columns:
-        trans["fechaf"] = pd.to_datetime(trans["fechaf"])
-    # Si se llama distinto (por ejemplo 'fecha'), puedes mapearla así:
-    elif "fecha" in trans.columns:
-        trans["fechaf"] = pd.to_datetime(trans["fecha"])
-    else:
-        # Si no hay ninguna, solo aviso en consola (no truena la app)
-        print("⚠️ El CSV de transacciones no tiene columna 'fechaf'.")
+    # aquí SÍ usamos parse_dates porque sabemos que combined tiene 'fechaf'
+    trans = pd.read_csv(trans_url, parse_dates=["fechaf"])
 
     return base, trans
 
@@ -77,46 +69,35 @@ power_transformer, xgb_model = load_model_and_transformer()
 # PREPARACIÓN DE DATOS COMUNES
 # ------------------------------------------------------------------
 
-@st.cache_data(show_spinner=False)
+
 @st.cache_data(show_spinner=False)
 def prepare_transactions_with_month_and_state(base, trans):
     df = trans.copy()
 
-    # --- Asegurarnos de tener una columna "month" aunque no exista "fechaf" ---
-
+    # Asegurarnos de que 'fechaf' esté en datetime
     if "fechaf" in df.columns:
-        # Si viene como texto, la convertimos a datetime
         if not np.issubdtype(df["fechaf"].dtype, np.datetime64):
             df["fechaf"] = pd.to_datetime(df["fechaf"], errors="coerce")
         df["month"] = df["fechaf"].dt.to_period("M").astype(str)
-
     else:
-        # Intentamos buscar alguna columna alternativa de fecha
-        alternative_date_cols = ["fecha", "Fecha", "date", "Date"]
-        used_alt = False
-        for alt in alternative_date_cols:
-            if alt in df.columns:
-                df[alt] = pd.to_datetime(df[alt], errors="coerce")
-                df["month"] = df[alt].dt.to_period("M").astype(str)
-                used_alt = True
-                break
+        # Si por alguna razón no viene, ponemos un mes genérico para no tronar
+        df["month"] = "Unknown"
 
-        if not used_alt:
-            # Si no encontramos ninguna fecha, asignamos un solo mes genérico
-            df["month"] = "Unknown"
-
-    # --- Unimos info de estado (y churn si existe) por usuario ---
-    merge_cols = ["id_user", "state"]
+    # Unimos info de usuario desde base_integrada
+    merge_cols = ["id_user"]
+    if "state" in base.columns:
+        merge_cols.append("state")
     if "churn" in base.columns:
         merge_cols.append("churn")
 
     df = df.merge(
-        base[merge_cols].drop_duplicates("id_user"),
+        base[merge_cols].drop_duplicates(subset="id_user", keep="first"),
         on="id_user",
         how="left"
     )
 
     return df
+
 
 
 
@@ -675,6 +656,7 @@ elif page.startswith("2"):
     page_2()
 else:
     page_3()
+
 
 
 
