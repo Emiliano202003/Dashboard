@@ -135,7 +135,7 @@ power_transformer, xgb_model = load_model_and_transformer()
 # PREPROCESO / MODELO DE CHURN
 # ==========================================================
 
-@st.cache_data(show_spinner=False)
+
 def score_users_with_model(base: pd.DataFrame | None,
                            power_tf,
                            model) -> pd.DataFrame:
@@ -629,3 +629,4 @@ elif page.startswith("2"):
     page_churn_risk()
 else:
     page_strategy()
+
