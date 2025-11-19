@@ -27,10 +27,14 @@ st.title("DanuCard – Churn & Risk Dashboard")
 
 @st.cache_data(show_spinner=False)
 def load_data():
-    # Ajusta los nombres si renombras los archivos
-    base = pd.read_csv("base_integrada (3).csv")
-    trans = pd.read_csv("combined_transactions (1).csv", parse_dates=["fechaf"])
+    base_url = "https://drive.google.com/uc?export=download&id=14a3S4LtFiG7j6pw1QtFWGxg1hx4bQvnz"
+    trans_url = "https://drive.google.com/uc?export=download&id=11S9-SZCMF30LGyMWz4nexjIW8Ltdi1oo"
+
+    base = pd.read_csv(base_url)
+    trans = pd.read_csv(trans_url, parse_dates=["fechaf"])
+
     return base, trans
+
 
 
 @st.cache_resource(show_spinner=False)
@@ -631,3 +635,4 @@ elif page.startswith("2"):
     page_2()
 else:
     page_3()
+
