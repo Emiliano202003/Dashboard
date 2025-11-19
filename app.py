@@ -1,4 +1,4 @@
-# app_nueva.py
+# app.py
 # -*- coding: utf-8 -*-
 
 import os
@@ -10,47 +10,79 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-# ------------------------------------------------------
-# CONFIG GENERAL
-# ------------------------------------------------------
+# ==========================================================
+# CONFIGURACIÓN GENERAL
+# ==========================================================
+
 st.set_page_config(
     page_title="DanuCard – Churn & Risk Dashboard",
-    layout="wide"
+    layout="wide",
 )
 
 st.title("DanuCard – Churn & Risk Dashboard")
 
-# ------------------------------------------------------
-# RUTAS / IDS IMPORTANTES (CÁMBIALO SI HACE FALTA)
-# ------------------------------------------------------
-# ID de Google Drive de tu base_integrada_small
-DRIVE_BASE_ID = "1YsiyVjCNO-9ZJx6uAI3AiO3wHE3hBE63"
+# ==========================================================
+# CONSTANTES
+# ==========================================================
 
-# Nombre local de los archivos en el repo
-AGG_FILE = "transactions_by_state_month.csv"
-POWER_PKL = "power_transformer.pkl"
-MODEL_PKL = "xgboost_model.pkl"
+AGG_TX_CSV = "transactions_by_state_month.csv"     # month, state, total_trx, total_amount, n_users
+USERS_CSV  = "base_integrada_small.csv"            # tu base integrada pequeña
 
-# ------------------------------------------------------
-# CARGA DE DATOS
-# ------------------------------------------------------
+# Si quieres usar Drive, pon aquí SOLO el ID del archivo (no toda la URL)
+DRIVE_BASE_ID = ""  # por ejemplo: "11S9-SZCMF30LGyMWz4nexjIW8Ltdi1oo" (si lo quieres usar)
+
+
+FEATURES_CAT = [
+    "share_tier", "antiguedad_categoria", "usertype",
+    "gender", "occupation", "creationflow",
+]
+
+FEATURES_NUM = [
+    "total_amount", "total_trx", "antiguedad_cliente_days",
+    "llamadas_cc", "minutos_cc", "aht_promedio_cc",
+    "trx_share_global",
+]
+
+
+# ==========================================================
+# FUNCIONES DE CARGA
+# ==========================================================
+
 @st.cache_data(show_spinner=False)
-def load_agg_transactions():
-    """
-    Carga el archivo agregado por mes y estado:
-    columnas esperadas: month, state, total_trx, total_amount, n_users
-    """
-    df = pd.read_csv(AGG_FILE)
-    df["month"] = df["month"].astype(str)
+def load_agg_transactions() -> pd.DataFrame:
+    """Carga archivo agregado de transacciones por mes y estado."""
+    if not os.path.exists(AGG_TX_CSV):
+        st.error(f"No se encontró el archivo {AGG_TX_CSV} en el repositorio.")
+        return pd.DataFrame()
+
+    df = pd.read_csv(AGG_TX_CSV)
+    # Normalizamos tipos
+    if "month" in df.columns:
+        df["month"] = df["month"].astype(str)
     return df
 
 
 @st.cache_data(show_spinner=False)
-def load_users_base_from_drive(file_id: str):
-    """
-    Descarga la base de usuarios desde Google Drive usando el ID.
-    """
-    url = f"https://drive.google.com/uc?export=download&id={file_id}"
+def load_users_base_local() -> pd.DataFrame | None:
+    """Intenta cargar la base de usuarios desde un CSV local."""
+    if not os.path.exists(USERS_CSV):
+        return None
+
+    try:
+        base = pd.read_csv(USERS_CSV)
+        return base
+    except Exception as e:
+        st.error(f"Error al leer {USERS_CSV}: {e}")
+        return None
+
+
+@st.cache_data(show_spinner=False)
+def load_users_base_from_drive(drive_id: str) -> pd.DataFrame | None:
+    """Carga base de usuarios desde Google Drive (si se proporciona ID)."""
+    if not drive_id:
+        return None
+
+    url = f"https://drive.google.com/uc?export=download&id={drive_id}"
     try:
         base = pd.read_csv(url)
         return base
@@ -61,127 +93,90 @@ def load_users_base_from_drive(file_id: str):
 
 @st.cache_resource(show_spinner=False)
 def load_model_and_transformer():
-    """
-    Carga el PowerTransformer y el modelo XGBoost desde archivos locales.
-    Si alguno falla, regresa None.
-    """
     power_tf = None
     model = None
 
-    try:
-        with open(POWER_PKL, "rb") as f:
-            power_tf = pickle.load(f)
-    except Exception as e:
-        st.warning(f"No se pudo cargar {POWER_PKL}: {e}")
+    if os.path.exists("power_transformer.pkl"):
+        try:
+            with open("power_transformer.pkl", "rb") as f:
+                power_tf = pickle.load(f)
+        except Exception as e:
+            st.warning(f"No se pudo cargar power_transformer.pkl: {e}")
+    else:
+        st.info("No se encontró power_transformer.pkl en el repositorio.")
 
-    try:
-        with open(MODEL_PKL, "rb") as f:
-            model = pickle.load(f)
-    except Exception as e:
-        st.warning(f"No se pudo cargar {MODEL_PKL}: {e}")
+    if os.path.exists("xgboost_model.pkl"):
+        try:
+            with open("xgboost_model.pkl", "rb") as f:
+                model = pickle.load(f)
+        except Exception as e:
+            st.warning(f"No se pudo cargar xgboost_model.pkl: {e}")
+    else:
+        st.info("No se encontró xgboost_model.pkl en el repositorio.")
 
     return power_tf, model
 
 
-# Cargamos datos globales
+# ==========================================================
+# CARGA GLOBAL DE DATOS
+# ==========================================================
+
 agg_tx = load_agg_transactions()
-base_integrada = load_users_base_from_drive(DRIVE_BASE_ID)
+
+# Primero intentamos local, si no existe intentamos Drive (si pusiste ID)
+base_integrada = load_users_base_local()
+if base_integrada is None:
+    base_integrada = load_users_base_from_drive(DRIVE_BASE_ID)
+
 power_transformer, xgb_model = load_model_and_transformer()
 
-# ------------------------------------------------------
-# MÉTRICAS A PARTIR DEL ARCHIVO AGREGADO (PAGE 1)
-# ------------------------------------------------------
-@st.cache_data(show_spinner=False)
-def compute_monthly_metrics(agg_df: pd.DataFrame) -> pd.DataFrame:
-    metrics = (
-        agg_df
-        .groupby("month", as_index=False)
-        .agg(
-            n_users=("n_users", "sum"),
-            total_trx=("total_trx", "sum"),
-            total_amount=("total_amount", "sum")
-        )
-        .sort_values("month")
-    )
 
-    metrics["users_growth_pct"] = metrics["n_users"].pct_change() * 100
-    metrics["trx_growth_pct"] = metrics["total_trx"].pct_change() * 100
-
-    metrics["amount_per_user"] = (
-        metrics["total_amount"] /
-        metrics["n_users"].replace(0, np.nan)
-    )
-    metrics["amount_per_user_growth_pct"] = (
-        metrics["amount_per_user"].pct_change() * 100
-    )
-
-    # Proxy de churn: caída de usuarios = churn
-    metrics["churn_proxy"] = -metrics["users_growth_pct"]
-
-    return metrics
-
+# ==========================================================
+# PREPROCESO / MODELO DE CHURN
+# ==========================================================
 
 @st.cache_data(show_spinner=False)
-def compute_state_metrics(agg_df: pd.DataFrame) -> pd.DataFrame:
-    df = (
-        agg_df
-        .groupby("state", as_index=False)
-        .agg(
-            n_users=("n_users", "sum"),
-            total_trx=("total_trx", "sum"),
-            total_amount=("total_amount", "sum")
-        )
-    )
-
-    df["trx_per_user"] = (
-        df["total_trx"] / df["n_users"].replace(0, np.nan)
-    )
-    df["amount_per_user"] = (
-        df["total_amount"] / df["n_users"].replace(0, np.nan)
-    )
-
-    # Proxy de churn por estado (menos usuarios => más churn)
-    df["churn_proxy"] = -df["n_users"]
-    return df
-
-
-monthly_metrics = compute_monthly_metrics(agg_tx)
-state_metrics = compute_state_metrics(agg_tx)
-
-# ------------------------------------------------------
-# MODELO DE CHURN SOBRE BASE DE USUARIOS (PAGE 2 / 3)
-# ------------------------------------------------------
-FEATURES_CAT = [
-    "share_tier", "antiguedad_categoria", "usertype", "gender",
-    "occupation", "creationflow"
-]
-
-FEATURES_NUM = [
-    "total_amount", "total_trx", "antiguedad_cliente_days",
-    "llamadas_cc", "minutos_cc", "aht_promedio_cc", "trx_share_global"
-]
-
-
-def score_users_with_model(base: pd.DataFrame,
+def score_users_with_model(base: pd.DataFrame | None,
                            power_tf,
                            model) -> pd.DataFrame:
-    """
-    Calcula churn_proba para cada usuario si el modelo y las columnas existen.
-    Si algo falla, añade churn_proba = NaN y regresa la base tal cual.
-    """
+    """Devuelve base con columna churn_proba si el modelo funciona."""
     if base is None or base.empty:
         return pd.DataFrame()
 
     df = base.copy()
 
-    missing = [c for c in (FEATURES_CAT + FEATURES_NUM) if c not in df.columns]
-    if missing:
-        st.warning(f"En la base de usuarios faltan columnas para el modelo: {missing}")
-    if missing or model is None:
+    # Aseguramos que exista id_user (clave)
+    if "id_user" not in df.columns:
+        st.warning("La base de usuarios no tiene columna 'id_user'.")
         df["churn_proba"] = np.nan
         return df
 
+    # Verificamos columnas requeridas
+    missing = [c for c in (FEATURES_CAT + FEATURES_NUM) if c not in df.columns]
+    if missing:
+        st.info(
+            "Faltan estas columnas para el modelo, se rellenan con valores neutros: "
+            + ", ".join(missing)
+        )
+        # Creamos columnas faltantes con valores neutros
+        for c in FEATURES_NUM:
+            if c not in df.columns:
+                df[c] = 0.0
+        for c in FEATURES_CAT:
+            if c not in df.columns:
+                df[c] = "Unknown"
+
+    if model is None:
+        st.info("El modelo XGBoost no se cargó. Se omiten las predicciones.")
+        df["churn_proba"] = np.nan
+        return df
+
+    # Filtramos filas con NaN en las features (solo para el modelo)
     df_model = df.dropna(subset=FEATURES_CAT + FEATURES_NUM).copy()
+    if df_model.empty:
+        st.info("No hay suficientes datos completos para el modelo.")
+        df["churn_proba"] = np.nan
+        return df
 
     # Numéricas
     X_num = df_model[FEATURES_NUM].values
@@ -189,10 +184,10 @@ def score_users_with_model(base: pd.DataFrame,
         try:
             X_num = power_tf.transform(X_num)
         except Exception:
-            # Si falla, usamos valores sin transformar
+            # Si falla el transformer, seguimos con numéricas en bruto
             pass
 
-    # Categóricas
+    # Categóricas -> one-hot
     X_cat = pd.get_dummies(df_model[FEATURES_CAT].astype(str), drop_first=False)
     X = np.concatenate([X_num, X_cat.values], axis=1)
 
@@ -200,44 +195,53 @@ def score_users_with_model(base: pd.DataFrame,
         proba = model.predict_proba(X)[:, 1]
         df_model["churn_proba"] = proba
     except Exception as e:
-        st.warning(f"El modelo no aceptó el formato de entrada: {e}")
+        st.info(f"El modelo no aceptó el formato de entrada ({e}). Se omiten predicciones.")
         df["churn_proba"] = np.nan
         return df
 
+    # Volvemos a unir al DF completo
     df = df.merge(df_model[["id_user", "churn_proba"]], on="id_user", how="left")
+
+    # Nivel de riesgo por días de inactividad (si existe)
+    if "max_dias_inactividad" in df.columns:
+        df["risk_level"] = pd.cut(
+            df["max_dias_inactividad"],
+            bins=[-1, 10, 20, 1000],
+            labels=["Low", "Medium", "High"],
+        )
+    else:
+        df["risk_level"] = np.nan
+
     return df
 
 
 base_scored = score_users_with_model(base_integrada, power_transformer, xgb_model)
 
-# Riesgo por días de inactividad
-if not base_scored.empty and "max_dias_inactividad" in base_scored.columns:
-    base_scored["risk_level"] = pd.cut(
-        base_scored["max_dias_inactividad"],
-        bins=[-1, 10, 20, 1000],
-        labels=["Low", "Medium", "High"]
-    )
-else:
-    if not base_scored.empty:
-        st.info("No se encontró max_dias_inactividad; no se calculan niveles de riesgo.")
-    if "risk_level" not in base_scored.columns:
-        base_scored["risk_level"] = np.nan
 
-# ------------------------------------------------------
-# ASIGNACIÓN DE MOTIVO DE CHURN (REGLAS SIMPLES)
-# ------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def compute_churn_reasons(df: pd.DataFrame) -> pd.DataFrame:
+    """Etiqueta un motivo de churn simple con reglas de negocio."""
     if df is None or df.empty:
         return pd.DataFrame()
 
     data = df.copy()
+
+    # Si tenemos etiqueta de churn real la usamos para subset,
+    # si no, usamos todos los que tengan probabilidad alta.
     if "churn" in data.columns:
         subset = data[data["churn"] == 1].copy()
         if subset.empty:
             subset = data
     else:
-        subset = data
+        if "churn_proba" in data.columns and data["churn_proba"].notna().any():
+            subset = data[data["churn_proba"] >= 0.3].copy()
+        else:
+            subset = data
+
+    # Percentiles sobre subset
+    for col in ["llamadas_cc", "total_amount", "total_trx"]:
+        if col not in subset.columns:
+            subset[col] = 0.0
 
     q_ll = subset["llamadas_cc"].quantile(0.75)
     q_amt = subset["total_amount"].quantile(0.25)
@@ -259,31 +263,100 @@ def compute_churn_reasons(df: pd.DataFrame) -> pd.DataFrame:
 
 base_with_reasons = compute_churn_reasons(base_scored)
 
-# ------------------------------------------------------
-# PÁGINA 1 – SERVICE / APP USAGE (AGREGADO)
-# ------------------------------------------------------
-def page_1():
-    st.subheader("1. Statistics on Service / App Usage")
+
+# ==========================================================
+# FUNCIONES DE MÉTRICAS A PARTIR DE transactions_by_state_month
+# ==========================================================
+
+@st.cache_data(show_spinner=False)
+def compute_monthly_metrics(agg_df: pd.DataFrame) -> pd.DataFrame:
+    """Resumen mensual (sumando todos los estados)."""
+    if agg_df.empty:
+        return pd.DataFrame()
+
+    metrics = (
+        agg_df
+        .groupby("month", as_index=False)
+        .agg(
+            n_users=("n_users", "sum"),
+            total_trx=("total_trx", "sum"),
+            total_amount=("total_amount", "sum"),
+        )
+        .sort_values("month")
+    )
+
+    metrics["amount_per_user"] = (
+        metrics["total_amount"] / metrics["n_users"].replace(0, np.nan)
+    )
+
+    metrics["users_growth_pct"] = metrics["n_users"].pct_change() * 100
+    metrics["trx_growth_pct"] = metrics["total_trx"].pct_change() * 100
+    metrics["amount_per_user_growth_pct"] = (
+        metrics["amount_per_user"].pct_change() * 100
+    )
+
+    # Proxy de churn: caída de usuarios
+    metrics["churn_proxy"] = -metrics["users_growth_pct"]
+
+    return metrics
+
+
+@st.cache_data(show_spinner=False)
+def compute_state_metrics(agg_df: pd.DataFrame) -> pd.DataFrame:
+    """Resumen por estado con el archivo agregado."""
+    if agg_df.empty:
+        return pd.DataFrame()
+
+    df = (
+        agg_df
+        .groupby("state", as_index=False)
+        .agg(
+            n_users=("n_users", "sum"),
+            total_trx=("total_trx", "sum"),
+            total_amount=("total_amount", "sum"),
+        )
+    )
+
+    df["trx_per_user"] = df["total_trx"] / df["n_users"].replace(0, np.nan)
+    df["amount_per_user"] = df["total_amount"] / df["n_users"].replace(0, np.nan)
+    df["churn_proxy"] = -df["n_users"]  # menos usuarios = más churn
+    return df
+
+
+monthly_metrics = compute_monthly_metrics(agg_tx)
+state_metrics = compute_state_metrics(agg_tx)
+
+
+# ==========================================================
+# PÁGINA 1 – OVERVIEW (NUEVO DISEÑO)
+# ==========================================================
+
+def page_overview():
+    st.subheader("1. Service / App Usage Overview")
+
+    if agg_tx.empty:
+        st.info("No se pudo cargar el archivo de transacciones agregadas.")
+        return
 
     df = agg_tx.copy()
 
+    # Filtros
     col_f1, col_f2 = st.columns(2)
-
     with col_f1:
         months_sorted = sorted(df["month"].unique())
         month_filter = st.multiselect(
-            "Date filter (meses, formato YYYY-MM)",
+            "Filter by month (YYYY-MM)",
             options=months_sorted,
-            default=months_sorted
+            default=months_sorted,
         )
 
     with col_f2:
         states_sorted = sorted(df["state"].dropna().unique())
         states_sorted = [s for s in states_sorted if s != "Unknown"]
         state_filter = st.multiselect(
-            "State filter",
+            "Filter by state",
             options=states_sorted,
-            default=states_sorted
+            default=states_sorted,
         )
 
     mask_month = df["month"].isin(month_filter)
@@ -296,321 +369,263 @@ def page_1():
 
     metrics_f = compute_monthly_metrics(df_f)
 
-    churn_increase = metrics_f["churn_proxy"].dropna().mean()
-    trx_increase = metrics_f["trx_growth_pct"].dropna().mean()
-    amount_increase = metrics_f["amount_per_user_growth_pct"].dropna().mean()
+    # KPIs principales (diseño distinto)
+    total_users = metrics_f["n_users"].iloc[-1]
+    total_amount = metrics_f["total_amount"].sum()
+    total_trx = metrics_f["total_trx"].sum()
+    avg_amount_per_user = metrics_f["amount_per_user"].iloc[-1]
 
-    churn_increase = np.round(churn_increase, 1) if not np.isnan(churn_increase) else 0.0
-    trx_increase = np.round(trx_increase, 1) if not np.isnan(trx_increase) else 0.0
-    amount_increase = np.round(amount_increase, 1) if not np.isnan(amount_increase) else 0.0
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.metric("Churn Monthly Average Increase (proxy)", f"{churn_increase:.1f}%")
-    with c2:
-        st.metric("Monthly Transactions Increase Avg", f"{trx_increase:.1f}%")
-    with c3:
-        st.metric("Monthly increase in avg Amount per user", f"{amount_increase:.1f}%")
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        st.metric("Current active users", f"{int(total_users):,}")
+    with k2:
+        st.metric("Total transactions (period)", f"{int(total_trx):,}")
+    with k3:
+        st.metric("Total amount (period)", f"{total_amount:,.0f}")
+    with k4:
+        st.metric("Avg amount per user (last month)", f"{avg_amount_per_user:,.2f}")
 
     st.markdown("---")
 
-    view_mode = st.radio(
-        "View",
-        options=["Historical", "Geographical"],
-        horizontal=True
-    )
+    col_top, col_bottom = st.columns([2, 1])
 
-    if view_mode == "Historical":
-        col_l, col_r = st.columns([2, 1])
-
-        with col_l:
-            fig = px.line(
-                metrics_f,
-                x="month",
-                y="n_users",
-                markers=True,
-                title="User activity – monthly tendency"
-            )
-            fig.update_layout(xaxis_title="Month", yaxis_title="Active users")
-            st.plotly_chart(fig, use_container_width=True)
-
-        with col_r:
-            if not base_scored.empty and "risk_level" in base_scored.columns:
-                dist = (
-                    base_scored["risk_level"]
-                    .value_counts()
-                    .reset_index()
-                )
-                dist.columns = ["risk_level", "count"]
-                fig_pie = px.pie(
-                    dist,
-                    names="risk_level",
-                    values="count",
-                    title="Historical client distribution (risk level)"
-                )
-                st.plotly_chart(fig_pie, use_container_width=True)
-            else:
-                st.info(
-                    "Aquí podrías mostrar el pie de riesgo histórico una vez que "
-                    "la base de usuarios y el modelo carguen correctamente."
-                )
-
-    else:
-        st.markdown("### Geographical view")
-
-        metric_choice = st.radio(
-            "Metric to display",
-            options=["Churn proxy", "Amount", "Transactions"],
-            horizontal=True
-        )
-
-        df_state = compute_state_metrics(df_f)
-
-        if metric_choice == "Churn proxy":
-            df_state["value"] = df_state["churn_proxy"]
-            value_label = "Churn proxy (lower users = more churn)"
-        elif metric_choice == "Amount":
-            df_state["value"] = df_state["amount_per_user"]
-            value_label = "Average amount per user"
-        else:
-            df_state["value"] = df_state["trx_per_user"]
-            value_label = "Average transactions per user"
-
-        geojson_path = "mexico_geojson.json"
-        if os.path.exists(geojson_path):
-            with open(geojson_path, "r", encoding="utf-8") as f:
-                mexico_geo = json.load(f)
-
-            fig_map = px.choropleth(
-                df_state,
-                geojson=mexico_geo,
-                locations="state",
-                featureidkey="properties.state_code",
-                color="value",
-                projection="mercator",
-                title=f"Heatmap by state – {value_label}"
-            )
-            fig_map.update_geos(fitbounds="locations", visible=False)
-            st.plotly_chart(fig_map, use_container_width=True)
-        else:
-            st.info(
-                "No se encontró 'mexico_geojson.json'. "
-                "Se muestra un gráfico de barras por estado."
-            )
-            fig_bar = px.bar(
-                df_state,
-                x="state",
-                y="value",
-                title=f"{value_label} by state"
-            )
-            st.plotly_chart(fig_bar, use_container_width=True)
-
-
-# ------------------------------------------------------
-# PÁGINA 2 – USER TENDENCY & USERS AT RISK
-# ------------------------------------------------------
-def page_2():
-    st.subheader("2. User Tendency & User at Risk Analysis")
-
-    if base_scored is None or base_scored.empty:
-        st.info("No se pudo cargar la base de usuarios para el modelo.")
-        return
-
-    # Tendencia usando proxy de churn mensual
-    tendency = monthly_metrics[["month", "churn_proxy"]].copy()
-    tendency.rename(columns={"churn_proxy": "avg_churn_risk"}, inplace=True)
-
-    col_graf, col_cards = st.columns([2, 1])
-
-    with col_graf:
-        fig = px.line(
-            tendency,
+    # Línea de tendencia: usuarios y churn proxy
+    with col_top:
+        fig_line = px.line(
+            metrics_f,
             x="month",
-            y="avg_churn_risk",
+            y=["n_users", "total_trx"],
             markers=True,
-            title="User Tendency – churn risk proxy over time"
+            title="User base & transactions over time",
         )
-        fig.update_layout(
+        fig_line.update_layout(
             xaxis_title="Month",
-            yaxis_title="Churn risk proxy (%)"
+            yaxis_title="Value",
+            legend_title="Metric",
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig_line, use_container_width=True)
 
-    with col_cards:
-        total_users = len(base_scored)
-        if "churn_proba" in base_scored.columns and base_scored["churn_proba"].notna().any():
-            prob = base_scored["churn_proba"]
-        elif "churn" in base_scored.columns:
-            prob = base_scored["churn"]
-        else:
-            prob = pd.Series(0.0, index=base_scored.index)
-
-        risk_flag = np.where(prob >= 0.3, "At risk", "Safe")
-        at_risk = (risk_flag == "At risk").sum()
-        safe = (risk_flag == "Safe").sum()
-
-        at_risk_pct = np.round(at_risk / total_users * 100, 1) if total_users > 0 else 0
-        safe_pct = np.round(safe / total_users * 100, 1) if total_users > 0 else 0
-
-        st.metric("Current users", total_users)
-        st.metric("Safe users", f"{safe_pct} %")
-        st.metric("At risk users", f"{at_risk_pct} %")
-        st.caption("Rojo: usuarios perdidos, Verde: usuarios ganados (conceptual).")
+    with col_bottom:
+        fig_churn = px.bar(
+            metrics_f,
+            x="month",
+            y="churn_proxy",
+            title="Churn proxy – month over month",
+        )
+        fig_churn.update_layout(
+            xaxis_title="Month",
+            yaxis_title="Churn proxy (%)",
+        )
+        st.plotly_chart(fig_churn, use_container_width=True)
 
     st.markdown("---")
-    st.markdown("### User at Risk Analysis")
+    st.markdown("### State comparison")
 
-    col_left, col_mid, col_right = st.columns([1, 1, 2])
+    df_state = compute_state_metrics(df_f)
 
-    with col_left:
-        st.markdown("**Client value (share_tier)**")
-        if "share_tier" in base_scored.columns:
-            tiers = sorted(base_scored["share_tier"].dropna().unique())
-            for t in tiers:
-                st.markdown(f"- {t}")
+    metric_choice = st.selectbox(
+        "Metric by state",
+        ["n_users", "trx_per_user", "amount_per_user", "churn_proxy"],
+        index=0,
+    )
 
-    with col_mid:
-        st.markdown("**Client risk (por días de inactividad)**")
-        st.markdown("- High: 20–42 días")
-        st.markdown("- Medium: 10–20 días")
-        st.markdown("- Low: 0–10 días")
-
-    with col_right:
-        if base_with_reasons is None or base_with_reasons.empty:
-            st.info("No se pudieron calcular los motivos de churn.")
-        else:
-            if "churn" in base_with_reasons.columns:
-                data_r = base_with_reasons[base_with_reasons["churn"] == 1]
-            else:
-                data_r = base_with_reasons
-
-            reasons_count = (
-                data_r["churn_reason"]
-                .value_counts()
-                .reindex(["LLAMADAS", "AMOUNT", "TRANSACTIONS", "CREATION FLOW"])
-                .fillna(0)
-                .reset_index()
-            )
-            reasons_count.columns = ["reason", "count"]
-
-            fig_bar = px.bar(
-                reasons_count,
-                x="reason",
-                y="count",
-                title="Users at risk by main churn motive"
-            )
-            fig_bar.update_layout(
-                xaxis_title="Motive for churn",
-                yaxis_title="Total users"
-            )
-            st.plotly_chart(fig_bar, use_container_width=True)
+    fig_state = px.bar(
+        df_state.sort_values(metric_choice, ascending=False),
+        x="state",
+        y=metric_choice,
+        title=f"States by {metric_choice}",
+    )
+    st.plotly_chart(fig_state, use_container_width=True)
 
 
-# ------------------------------------------------------
-# PÁGINA 3 – STRATEGY FOR CHURN RISK BY TIER
-# ------------------------------------------------------
-def page_3():
-    st.subheader("3. Strategy for Churn Risk by Tier")
+# ==========================================================
+# PÁGINA 2 – CHURN & USER RISK (NUEVO DISEÑO)
+# ==========================================================
+
+def page_churn_risk():
+    st.subheader("2. Churn & User Risk")
 
     if base_scored is None or base_scored.empty:
-        st.info("No se pudo cargar la base de usuarios para el modelo.")
+        st.info("No se pudo cargar la base de usuarios o el modelo.")
         return
 
-    if "share_tier" not in base_scored.columns:
-        st.info("No existe la columna share_tier en la base.")
+    df = base_scored.copy()
+
+    # Si no hay churn_proba, usamos etiqueta churn si existe
+    if "churn_proba" in df.columns and df["churn_proba"].notna().any():
+        df["churn_score"] = df["churn_proba"]
+        score_col = "churn_proba"
+        score_label = "Predicted churn probability"
+    elif "churn" in df.columns:
+        df["churn_score"] = df["churn"]
+        score_col = "churn"
+        score_label = "Observed churn label"
+    else:
+        st.info("No hay probabilidad ni etiqueta de churn para analizar.")
         return
 
-    tiers = sorted(base_scored["share_tier"].dropna().unique())
-    selected_tier = st.selectbox("Tier filter", options=tiers)
+    # Definimos bandas de riesgo
+    df["risk_band"] = pd.cut(
+        df["churn_score"],
+        bins=[-0.01, 0.3, 0.6, 1.01],
+        labels=["Low", "Medium", "High"],
+    )
 
-    st.markdown("#### Strategies by churn motive")
+    # Métricas globales
+    total_users = len(df)
+    high_risk = (df["risk_band"] == "High").sum()
+    medium_risk = (df["risk_band"] == "Medium").sum()
 
-    col1, col2 = st.columns(2)
-    motives = ["LLAMADAS", "TRANSACTIONS", "AMOUNT", "CREATION FLOW"]
+    k1, k2, k3 = st.columns(3)
+    with k1:
+        st.metric("Total users", f"{total_users:,}")
+    with k2:
+        st.metric("High-risk users", f"{high_risk:,}")
+    with k3:
+        st.metric("Medium-risk users", f"{medium_risk:,}")
 
-    with col1:
-        for motive in motives[:2]:
-            with st.expander(f"Strategy for {motive.title()} – click to view"):
-                st.write(
-                    f"Aquí iría la estrategia específica para **Tier {selected_tier}** "
-                    f"y motivo **{motive}**."
-                )
+    st.markdown("---")
 
-    with col2:
-        for motive in motives[2:]:
-            with st.expander(f"Strategy for {motive.title()} – click to view"):
-                st.write(
-                    f"Aquí iría la estrategia específica para **Tier {selected_tier}** "
-                    f"y motivo **{motive}**."
-                )
+    col_hist, col_pie = st.columns([2, 1])
 
-    st.markdown("#### All together")
-    with st.expander("All motives and all tiers"):
+    with col_hist:
+        fig_hist = px.histogram(
+            df,
+            x=score_col,
+            nbins=30,
+            title=f"{score_label} distribution",
+        )
+        fig_hist.update_layout(
+            xaxis_title=score_label,
+            yaxis_title="Users",
+        )
+        st.plotly_chart(fig_hist, use_container_width=True)
+
+    with col_pie:
+        band_counts = (
+            df["risk_band"]
+            .value_counts()
+            .reindex(["Low", "Medium", "High"])
+            .fillna(0)
+            .reset_index()
+        )
+        band_counts.columns = ["risk_band", "count"]
+        fig_pie = px.pie(
+            band_counts,
+            names="risk_band",
+            values="count",
+            title="Users by risk band",
+        )
+        st.plotly_chart(fig_pie, use_container_width=True)
+
+    st.markdown("---")
+    st.markdown("### Segmentation by tier and risk")
+
+    if "share_tier" in df.columns:
+        seg = (
+            df.groupby(["share_tier", "risk_band"])
+            .size()
+            .reset_index(name="users")
+        )
+        fig_seg = px.bar(
+            seg,
+            x="share_tier",
+            y="users",
+            color="risk_band",
+            barmode="group",
+            title="Users by tier and risk band",
+        )
+        st.plotly_chart(fig_seg, use_container_width=True)
+    else:
+        st.info("La base no tiene columna 'share_tier' para segmentar por tier.")
+
+
+# ==========================================================
+# PÁGINA 3 – STRATEGY BY SEGMENT (NUEVO DISEÑO)
+# ==========================================================
+
+def page_strategy():
+    st.subheader("3. Strategy for Churn Risk Segments")
+
+    if base_with_reasons is None or base_with_reasons.empty:
+        st.info("No se pudieron calcular los motivos de churn.")
+        return
+
+    df = base_with_reasons.copy()
+
+    # Si no hay churn_proba ni churn, usamos todos
+    if "churn_proba" in df.columns and df["churn_proba"].notna().any():
+        df_segment = df[df["churn_proba"] >= 0.3].copy()
+    elif "churn" in df.columns:
+        df_segment = df[df["churn"] == 1].copy()
+    else:
+        df_segment = df.copy()
+
+    if df_segment.empty:
+        st.info("No hay usuarios en riesgo identificados con las reglas actuales.")
+        return
+
+    col_motivos, col_tabla = st.columns([1, 1])
+
+    with col_motivos:
+        reasons_count = (
+            df_segment["churn_reason"]
+            .value_counts()
+            .reindex(["LLAMADAS", "AMOUNT", "TRANSACTIONS", "CREATION FLOW"])
+            .fillna(0)
+            .reset_index()
+        )
+        reasons_count.columns = ["reason", "users"]
+
+        fig_mot = px.bar(
+            reasons_count,
+            x="reason",
+            y="users",
+            title="Users at risk by main churn motive",
+        )
+        st.plotly_chart(fig_mot, use_container_width=True)
+
+    with col_tabla:
+        st.markdown("**Suggested actions by motive (template)**")
         st.write(
-            "Sección para resumir las 12 soluciones (4 motivos × 3 tiers)."
+            "- **LLAMADAS**: revisar tiempo de espera en call center, ofrecer canal digital alterno.\n"
+            "- **AMOUNT**: incentivar mayor uso con cashback o promociones específicas.\n"
+            "- **TRANSACTIONS**: campañas de reactivación y recordatorios personalizados.\n"
+            "- **CREATION FLOW**: simplificar onboarding y mejorar comunicación inicial."
         )
 
     st.markdown("---")
-    st.markdown("### Churn tendency and impact of strategies (simulación)")
+    st.markdown("### Table of key segments (tier × motive)")
 
-    hist = monthly_metrics.sort_values("month").copy()
-    if hist.empty:
-        st.info("No hay información mensual suficiente para graficar.")
-        return
-
-    last_rate = hist["churn_proxy"].iloc[-1]
-
-    scenarios = []
-    for scen_name, reduction in [
-        ("Historical", 0.0),
-        ("Calls strategy (+2%)", 0.02),
-        ("Transactions strategy (+5%)", 0.05),
-        ("All together (+20%)", 0.20),
-    ]:
-        values = hist["churn_proxy"].copy()
-        if scen_name != "Historical":
-            new_last = max(last_rate * (1 - reduction), 0)
-            values.iloc[-1] = new_last
-
-        tmp = pd.DataFrame({
-            "month": hist["month"],
-            "churn_rate": values,
-            "scenario": scen_name
-        })
-        scenarios.append(tmp)
-
-    df_scenarios = pd.concat(scenarios, ignore_index=True)
-
-    fig_scen = px.line(
-        df_scenarios,
-        x="month",
-        y="churn_rate",
-        color="scenario",
-        markers=True,
-        title="Churn rate with and without strategies (simulated impact)"
-    )
-    fig_scen.update_layout(
-        xaxis_title="Month",
-        yaxis_title="Churn proxy (%)"
-    )
-    st.plotly_chart(fig_scen, use_container_width=True)
+    if "share_tier" in df_segment.columns:
+        seg_table = (
+            df_segment
+            .groupby(["share_tier", "churn_reason"])
+            .size()
+            .reset_index(name="users")
+            .sort_values("users", ascending=False)
+        )
+        st.dataframe(seg_table, use_container_width=True)
+    else:
+        st.info("La base no tiene columna 'share_tier'; se omite la tabla por tier.")
 
 
-# ------------------------------------------------------
+# ==========================================================
 # NAVEGACIÓN
-# ------------------------------------------------------
+# ==========================================================
+
 page = st.sidebar.radio(
-    "Selecciona la página",
+    "Select page",
     options=[
-        "1. Service / App usage",
-        "2. User tendency & risk",
-        "3. Strategy by tier"
-    ]
+        "1. Overview",
+        "2. Churn & risk",
+        "3. Strategy",
+    ],
 )
 
 if page.startswith("1"):
-    page_1()
+    page_overview()
 elif page.startswith("2"):
-    page_2()
+    page_churn_risk()
 else:
-    page_3()
+    page_strategy()
