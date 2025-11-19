@@ -78,19 +78,46 @@ power_transformer, xgb_model = load_model_and_transformer()
 # ------------------------------------------------------------------
 
 @st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False)
 def prepare_transactions_with_month_and_state(base, trans):
     df = trans.copy()
-    df["fechaf"] = pd.to_datetime(df["fechaf"])
-    df["month"] = df["fechaf"].dt.to_period("M").astype(str)
 
-    # Unimos info de estado (y churn si existe) por usuario
+    # --- Asegurarnos de tener una columna "month" aunque no exista "fechaf" ---
+
+    if "fechaf" in df.columns:
+        # Si viene como texto, la convertimos a datetime
+        if not np.issubdtype(df["fechaf"].dtype, np.datetime64):
+            df["fechaf"] = pd.to_datetime(df["fechaf"], errors="coerce")
+        df["month"] = df["fechaf"].dt.to_period("M").astype(str)
+
+    else:
+        # Intentamos buscar alguna columna alternativa de fecha
+        alternative_date_cols = ["fecha", "Fecha", "date", "Date"]
+        used_alt = False
+        for alt in alternative_date_cols:
+            if alt in df.columns:
+                df[alt] = pd.to_datetime(df[alt], errors="coerce")
+                df["month"] = df[alt].dt.to_period("M").astype(str)
+                used_alt = True
+                break
+
+        if not used_alt:
+            # Si no encontramos ninguna fecha, asignamos un solo mes genérico
+            df["month"] = "Unknown"
+
+    # --- Unimos info de estado (y churn si existe) por usuario ---
     merge_cols = ["id_user", "state"]
     if "churn" in base.columns:
         merge_cols.append("churn")
 
-    df = df.merge(base[merge_cols].drop_duplicates("id_user"),
-                  on="id_user", how="left")
+    df = df.merge(
+        base[merge_cols].drop_duplicates("id_user"),
+        on="id_user",
+        how="left"
+    )
+
     return df
+
 
 
 @st.cache_data(show_spinner=False)
@@ -648,5 +675,6 @@ elif page.startswith("2"):
     page_2()
 else:
     page_3()
+
 
 
