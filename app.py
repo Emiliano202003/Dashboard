@@ -164,7 +164,6 @@ FEATURES_NUM = [
 ]
 
 
-@st.cache_data(show_spinner=False)
 def score_users_with_model(base, power_tf, model):
     if base is None:
         return pd.DataFrame()
@@ -621,5 +620,6 @@ elif page.startswith("2"):
     page_2()
 else:
     page_3()
+
 
 
