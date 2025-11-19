@@ -166,19 +166,22 @@ FEATURES_NUM = [
 
 
 def score_users_with_model(base, power_tf, model):
+    # Si no hay base, regresamos DF vacío
     if base is None:
         return pd.DataFrame()
 
     df = base.copy()
 
+    # Revisamos columnas requeridas
     missing = [c for c in (FEATURES_CAT + FEATURES_NUM) if c not in df.columns]
+
+    # Si faltan columnas o no hay modelo, simplemente no calculamos nada
     if missing or model is None:
-        st.info(
-            "No se encontraron todas las columnas necesarias o el modelo "
-            "no se cargó. Se omiten las predicciones."
-        )
+        # No mostramos mensajes, solo devolvemos la base con churn_proba en NaN
         df["churn_proba"] = np.nan
         return df
+
+    # --- A partir de aquí es igual que antes ---
 
     df_model = df.dropna(subset=FEATURES_CAT + FEATURES_NUM).copy()
 
@@ -188,20 +191,23 @@ def score_users_with_model(base, power_tf, model):
         try:
             X_num = power_tf.transform(X_num)
         except Exception:
+            # si falla el transformer, seguimos con los datos crudos
             pass
 
     # Categóricas
     X_cat = pd.get_dummies(df_model[FEATURES_CAT].astype(str), drop_first=False)
     X = np.concatenate([X_num, X_cat.values], axis=1)
 
+    # Predicción
     try:
         proba = model.predict_proba(X)[:, 1]
         df_model["churn_proba"] = proba
     except Exception:
-        st.info("El modelo no aceptó el formato de entrada. Se omiten predicciones.")
+        # Si el modelo truena, mejor no romper nada
         df["churn_proba"] = np.nan
         return df
 
+    # Unimos de regreso
     df = df.merge(df_model[["id_user", "churn_proba"]], on="id_user", how="left")
     return df
 
@@ -621,6 +627,7 @@ elif page.startswith("2"):
     page_2()
 else:
     page_3()
+
 
 
 
