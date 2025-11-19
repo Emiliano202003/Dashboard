@@ -27,17 +27,29 @@ st.title("DanuCard – Churn & Risk Dashboard")
 
 @st.cache_data(show_spinner=False)
 def load_data():
-    # base_integrada (3).csv
+    # base_integrada (3).csv  -> tiene state, churn, etc.
     base_url = "https://drive.google.com/uc?export=download&id=11S9-SZCMF30LGyMWz4nexjIW8Ltdi1oo"
-    # combined_transactions (1).csv
+    # combined_transactions (1).csv -> tiene fechaf, trnx, amount, id_user
     trans_url = "https://drive.google.com/uc?export=download&id=14a3S4LtFiG7j6pw1QtFWGxg1hx4bQvnz"
 
     base = pd.read_csv(base_url)
 
-    # aquí SÍ usamos parse_dates porque sabemos que combined tiene 'fechaf'
-    trans = pd.read_csv(trans_url, parse_dates=["fechaf"])
+    # 👇 AQUÍ YA NO USAMOS parse_dates
+    trans = pd.read_csv(trans_url)
+
+    # Convertimos a datetime solo si existe la columna
+    if "fechaf" in trans.columns:
+        trans["fechaf"] = pd.to_datetime(trans["fechaf"], errors="coerce")
+    elif "fecha" in trans.columns:
+        trans["fechaf"] = pd.to_datetime(trans["fecha"], errors="coerce")
+    else:
+        print("⚠️ El CSV de transacciones no tiene columna 'fechaf' ni 'fecha'.")
+
+    # Debug opcional para verificar columnas
+    print("Columnas de transacciones:", list(trans.columns))
 
     return base, trans
+
 
 
 
@@ -656,6 +668,7 @@ elif page.startswith("2"):
     page_2()
 else:
     page_3()
+
 
 
 
