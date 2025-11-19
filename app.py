@@ -77,18 +77,18 @@ def load_users_base_local() -> pd.DataFrame | None:
 
 
 @st.cache_data(show_spinner=False)
-def load_users_base_from_drive(drive_id: str) -> pd.DataFrame | None:
-    """Carga base de usuarios desde Google Drive (si se proporciona ID)."""
-    if not drive_id:
-        return None
-
-    url = f"https://drive.google.com/uc?export=download&id={drive_id}"
+def load_users_base():
+    """
+    Carga la base de usuarios desde un CSV local en el repo.
+    Asegúrate de que el archivo exista en la misma carpeta que app.py.
+    """
     try:
-        base = pd.read_csv(url)
+        base = pd.read_csv("base_integrada_small.csv")  # <-- NOMBRE DEL ARCHIVO
         return base
     except Exception as e:
-        st.error(f"No se pudo cargar la base de usuarios desde Drive: {e}")
+        st.error(f"No se pudo cargar la base de usuarios: {e}")
         return None
+
 
 
 @st.cache_resource(show_spinner=False)
@@ -122,13 +122,13 @@ def load_model_and_transformer():
 # ==========================================================
 
 agg_tx = load_agg_transactions()
-
-# Primero intentamos local, si no existe intentamos Drive (si pusiste ID)
-base_integrada = load_users_base_local()
-if base_integrada is None:
-    base_integrada = load_users_base_from_drive(DRIVE_BASE_ID)
-
+base_integrada = load_users_base()
 power_transformer, xgb_model = load_model_and_transformer()
+
+# ¡OJO! score_users_with_model SIN decorador @st.cache_data
+base_scored = score_users_with_model(base_integrada, power_transformer, xgb_model)
+base_with_reasons = compute_churn_reasons(base_scored)
+
 
 
 # ==========================================================
@@ -629,4 +629,5 @@ elif page.startswith("2"):
     page_churn_risk()
 else:
     page_strategy()
+
 
