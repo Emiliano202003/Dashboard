@@ -27,30 +27,23 @@ st.title("DanuCard – Churn & Risk Dashboard")
 
 @st.cache_data(show_spinner=False)
 def load_data():
-    # base_integrada (3).csv  -> tiene state, churn, etc.
+    # base_integrada (3).csv  -> tiene id_user, state, churn, etc.
     base_url = "https://drive.google.com/uc?export=download&id=11S9-SZCMF30LGyMWz4nexjIW8Ltdi1oo"
     # combined_transactions (1).csv -> tiene fechaf, trnx, amount, id_user
     trans_url = "https://drive.google.com/uc?export=download&id=14a3S4LtFiG7j6pw1QtFWGxg1hx4bQvnz"
 
     base = pd.read_csv(base_url)
-
-    # 👇 AQUÍ YA NO USAMOS parse_dates
     trans = pd.read_csv(trans_url)
 
-    # Convertimos a datetime solo si existe la columna
+    # Aseguramos tipos de fecha
     if "fechaf" in trans.columns:
         trans["fechaf"] = pd.to_datetime(trans["fechaf"], errors="coerce")
-    elif "fecha" in trans.columns:
-        trans["fechaf"] = pd.to_datetime(trans["fecha"], errors="coerce")
-    else:
-        print("⚠️ El CSV de transacciones no tiene columna 'fechaf' ni 'fecha'.")
 
-    # Debug opcional para verificar columnas
-    print("Columnas de transacciones:", list(trans.columns))
+    # Debug para ver en Streamlit qué está leyendo
+    st.write("Columnas de base_integrada:", list(base.columns))
+    st.write("Columnas de transacciones:", list(trans.columns))
 
     return base, trans
-
-
 
 
 
@@ -86,29 +79,45 @@ power_transformer, xgb_model = load_model_and_transformer()
 def prepare_transactions_with_month_and_state(base, trans):
     df = trans.copy()
 
-    # Asegurarnos de que 'fechaf' esté en datetime
+    # --------- Month a partir de fechaf ---------
     if "fechaf" in df.columns:
         if not np.issubdtype(df["fechaf"].dtype, np.datetime64):
             df["fechaf"] = pd.to_datetime(df["fechaf"], errors="coerce")
         df["month"] = df["fechaf"].dt.to_period("M").astype(str)
     else:
-        # Si por alguna razón no viene, ponemos un mes genérico para no tronar
         df["month"] = "Unknown"
 
-    # Unimos info de usuario desde base_integrada
-    merge_cols = ["id_user"]
-    if "state" in base.columns:
-        merge_cols.append("state")
-    if "churn" in base.columns:
-        merge_cols.append("churn")
+    # --------- Merge con base_integrada ---------
+    # Esperamos que base tenga estas columnas:
+    columnas_esperadas = ["id_user", "state", "churn"]
+
+    # Cuáles sí están realmente en base (según lo que ve Streamlit)
+    columnas_presentes = [c for c in columnas_esperadas if c in base.columns]
+
+    if "id_user" not in base.columns:
+        # Sin id_user no podemos hacer merge, pero no rompemos la app
+        st.warning("⚠️ 'id_user' NO aparece en base_integrada según lo que lee Streamlit. No se hace merge.")
+        # Creamos columnas vacías por si las usa luego
+        for c in ["state", "churn"]:
+            if c not in df.columns:
+                df[c] = np.nan
+        return df
+
+    # Si por alguna razón no hay ni state ni churn, avisamos
+    faltantes = [c for c in ["state", "churn"] if c not in base.columns]
+    if faltantes:
+        st.warning(f"⚠️ En base_integrada faltan estas columnas según Streamlit: {faltantes}")
+
+    base_simplificada = base[columnas_presentes].drop_duplicates(subset="id_user", keep="first")
 
     df = df.merge(
-        base[merge_cols].drop_duplicates(subset="id_user", keep="first"),
+        base_simplificada,
         on="id_user",
         how="left"
     )
 
     return df
+
 
 
 
@@ -668,6 +677,7 @@ elif page.startswith("2"):
     page_2()
 else:
     page_3()
+
 
 
 
