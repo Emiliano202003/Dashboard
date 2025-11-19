@@ -37,15 +37,14 @@ def load_agg_transactions():
 
 
 @st.cache_data(show_spinner=False)
-@st.cache_data(show_spinner=False)
 def load_users_base():
     """
     Carga la base de usuarios desde Google Drive.
-    Sustituye TU_ID_DE_BASE_EN_DRIVE por el ID de tu archivo (puede ser la base small).
+    IMPORTANTE: aquí solo va el ID del archivo, NO el link completo.
     """
     base_url = (
         "https://drive.google.com/uc?export=download&id="
-        "https://drive.google.com/file/d/1YsiyVjCNO-9ZJx6uAI3AiO3wHE3hBE63/view?usp=sharing"
+        "1YsiyVjCNO-9ZJx6uAI3AiO3wHE3hBE63"   # <-- solo el ID
     )
     try:
         base = pd.read_csv(base_url)
@@ -620,6 +619,7 @@ elif page.startswith("2"):
     page_2()
 else:
     page_3()
+
 
 
 
