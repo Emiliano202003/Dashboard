@@ -44,88 +44,213 @@ FEATURES_NUM = [
 ]
 
 
-# ==========================================================
-# FUNCIONES DE CARGA
-# ==========================================================
+# ------------------------------------------------------------------
+# CARGA DE DATOS
+# ------------------------------------------------------------------
 
 @st.cache_data(show_spinner=False)
-def load_agg_transactions() -> pd.DataFrame:
-    """Carga archivo agregado de transacciones por mes y estado."""
-    if not os.path.exists(AGG_TX_CSV):
-        st.error(f"No se encontró el archivo {AGG_TX_CSV} en el repositorio.")
-        return pd.DataFrame()
-
-    df = pd.read_csv(AGG_TX_CSV)
-    # Normalizamos tipos
-    if "month" in df.columns:
-        df["month"] = df["month"].astype(str)
+def load_agg_transactions():
+    """
+    Carga el archivo ya agregado por mes y estado:
+    columnas: month, state, total_trx, total_amount, n_users
+    """
+    df = pd.read_csv("transactions_by_state_month.csv")
+    df["month"] = df["month"].astype(str)
     return df
-
-
-@st.cache_data(show_spinner=False)
-def load_users_base_local() -> pd.DataFrame | None:
-    """Intenta cargar la base de usuarios desde un CSV local."""
-    if not os.path.exists(USERS_CSV):
-        return None
-
-    try:
-        base = pd.read_csv(USERS_CSV)
-        return base
-    except Exception as e:
-        st.error(f"Error al leer {USERS_CSV}: {e}")
-        return None
 
 
 @st.cache_data(show_spinner=False)
 def load_users_base():
     """
-    Carga la base de usuarios desde un CSV local en el repo.
-    Asegúrate de que el archivo exista en la misma carpeta que app.py.
+    Carga la base de usuarios (versión small) directamente desde Google Drive.
+    IMPORTANTE: este es el único lugar donde se lee la base de usuarios.
     """
+    url = "https://drive.google.com/uc?export=download&id=1YsiyVjCNO-9ZJx6uAI3AiO3wHE3hBE63"
     try:
-        base = pd.read_csv("base_integrada_small.csv")  # <-- NOMBRE DEL ARCHIVO
+        base = pd.read_csv(url)
         return base
     except Exception as e:
-        st.error(f"No se pudo cargar la base de usuarios: {e}")
-        return None
-
+        st.error(f"No se pudo cargar la base de usuarios desde Drive: {e}")
+        return pd.DataFrame()
 
 
 @st.cache_resource(show_spinner=False)
 def load_model_and_transformer():
     power_tf = None
     model = None
+    try:
+        with open("power_transformer.pkl", "rb") as f:
+            power_tf = pickle.load(f)
+    except Exception as e:
+        st.warning(f"No se pudo cargar power_transformer.pkl: {e}")
 
-    if os.path.exists("power_transformer.pkl"):
-        try:
-            with open("power_transformer.pkl", "rb") as f:
-                power_tf = pickle.load(f)
-        except Exception as e:
-            st.warning(f"No se pudo cargar power_transformer.pkl: {e}")
-    else:
-        st.info("No se encontró power_transformer.pkl en el repositorio.")
-
-    if os.path.exists("xgboost_model.pkl"):
-        try:
-            with open("xgboost_model.pkl", "rb") as f:
-                model = pickle.load(f)
-        except Exception as e:
-            st.warning(f"No se pudo cargar xgboost_model.pkl: {e}")
-    else:
-        st.info("No se encontró xgboost_model.pkl en el repositorio.")
+    try:
+        with open("xgboost_model.pkl", "rb") as f:
+            model = pickle.load(f)
+    except Exception as e:
+        st.warning(f"No se pudo cargar xgboost_model.pkl: {e}")
 
     return power_tf, model
 
 
-# ==========================================================
-# CARGA GLOBAL DE DATOS
-# ==========================================================
+# ------------------------------------------------------------------
+# MÉTRICAS A PARTIR DEL ARCHIVO AGREGADO (transactions_by_state_month)
+# ------------------------------------------------------------------
+
+@st.cache_data(show_spinner=False)
+def compute_monthly_metrics(agg_df: pd.DataFrame) -> pd.DataFrame:
+    metrics = (
+        agg_df
+        .groupby("month", as_index=False)
+        .agg(
+            n_users=("n_users", "sum"),
+            total_trx=("total_trx", "sum"),
+            total_amount=("total_amount", "sum")
+        )
+        .sort_values("month")
+    )
+
+    metrics["users_growth_pct"] = metrics["n_users"].pct_change() * 100
+    metrics["trx_growth_pct"] = metrics["total_trx"].pct_change() * 100
+
+    metrics["amount_per_user"] = (
+        metrics["total_amount"] /
+        metrics["n_users"].replace(0, np.nan)
+    )
+    metrics["amount_per_user_growth_pct"] = (
+        metrics["amount_per_user"].pct_change() * 100
+    )
+
+    # Proxy sencillo de churn: caída de usuarios = churn
+    metrics["churn_proxy"] = -metrics["users_growth_pct"]
+
+    return metrics
+
+
+@st.cache_data(show_spinner=False)
+def compute_state_metrics(agg_df: pd.DataFrame) -> pd.DataFrame:
+    df = (
+        agg_df
+        .groupby("state", as_index=False)
+        .agg(
+            n_users=("n_users", "sum"),
+            total_trx=("total_trx", "sum"),
+            total_amount=("total_amount", "sum")
+        )
+    )
+
+    df["trx_per_user"] = (
+        df["total_trx"] / df["n_users"].replace(0, np.nan)
+    )
+    df["amount_per_user"] = (
+        df["total_amount"] / df["n_users"].replace(0, np.nan)
+    )
+
+    # Proxy de churn por estado (menos usuarios ⇒ más churn)
+    df["churn_proxy"] = -df["n_users"]
+    return df
+
+
+# ------------------------------------------------------------------
+# MODELO DE CHURN SOBRE BASE DE USUARIOS
+# ------------------------------------------------------------------
+
+FEATURES_CAT = [
+    "share_tier", "antiguedad_categoria", "usertype", "gender",
+    "occupation", "creationflow"
+]
+
+FEATURES_NUM = [
+    "total_amount", "total_trx", "antiguedad_cliente_days",
+    "llamadas_cc", "minutos_cc", "aht_promedio_cc", "trx_share_global"
+]
+
+
+def score_users_with_model(base: pd.DataFrame,
+                           power_tf,
+                           model) -> pd.DataFrame:
+    if base is None or base.empty:
+        return pd.DataFrame()
+
+    df = base.copy()
+
+    missing = [c for c in (FEATURES_CAT + FEATURES_NUM) if c not in df.columns]
+    if missing or model is None:
+        st.info(
+            "No se encontraron todas las columnas necesarias o el modelo "
+            "no se cargó. Se omiten las predicciones."
+        )
+        df["churn_proba"] = np.nan
+        return df
+
+    df_model = df.dropna(subset=FEATURES_CAT + FEATURES_NUM).copy()
+
+    # Numéricas
+    X_num = df_model[FEATURES_NUM].values
+    if power_tf is not None:
+        try:
+            X_num = power_tf.transform(X_num)
+        except Exception:
+            pass
+
+    # Categóricas
+    X_cat = pd.get_dummies(df_model[FEATURES_CAT].astype(str), drop_first=False)
+    X = np.concatenate([X_num, X_cat.values], axis=1)
+
+    try:
+        proba = model.predict_proba(X)[:, 1]
+        df_model["churn_proba"] = proba
+    except Exception:
+        st.info("El modelo no aceptó el formato de entrada. Se omiten predicciones.")
+        df["churn_proba"] = np.nan
+        return df
+
+    df = df.merge(df_model[["id_user", "churn_proba"]], on="id_user", how="left")
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def compute_churn_reasons(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    data = df.copy()
+    if "churn" in data.columns:
+        subset = data[data["churn"] == 1].copy()
+        if subset.empty:
+            subset = data
+    else:
+        subset = data
+
+    q_ll = subset["llamadas_cc"].quantile(0.75)
+    q_amt = subset["total_amount"].quantile(0.25)
+    q_trx = subset["total_trx"].quantile(0.25)
+
+    def _reason(row):
+        if row["llamadas_cc"] >= q_ll:
+            return "LLAMADAS"
+        elif row["total_amount"] <= q_amt:
+            return "AMOUNT"
+        elif row["total_trx"] <= q_trx:
+            return "TRANSACTIONS"
+        else:
+            return "CREATION FLOW"
+
+    data["churn_reason"] = data.apply(_reason, axis=1)
+    return data
+
+
+# ------------------------------------------------------------------
+# CARGA EFECTIVA DE DATOS (SE EJECUTA UNA VEZ, DESPUÉS DE DEFINIR TODO LO DE ARRIBA)
+# ------------------------------------------------------------------
 
 agg_tx = load_agg_transactions()
 base_integrada = load_users_base()
 power_transformer, xgb_model = load_model_and_transformer()
 
-# ¡OJO! score_users_with_model SIN decorador @st.cache_data
+monthly_metrics = compute_monthly_metrics(agg_tx)
+state_metrics = compute_state_metrics(agg_tx)
+
 base_scored = score_users_with_model(base_integrada, power_transformer, xgb_model)
 base_with_reasons = compute_churn_reasons(base_scored)
 
@@ -629,5 +754,6 @@ elif page.startswith("2"):
     page_churn_risk()
 else:
     page_strategy()
+
 
 
